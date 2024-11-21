@@ -1,0 +1,7 @@
+.github
+.dockerignore
+.env
+.gitignore
+Dockerfile
+README.md
+Stew

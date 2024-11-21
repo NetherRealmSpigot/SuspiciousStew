@@ -1,0 +1,143 @@
+name: Build and Test
+
+on:
+  pull_request:
+    branches:
+      - "master"
+    paths:
+      - "**/*.go"
+      - "sql/*.sql"
+      - "Dockerfile"
+      - "docker-entrypoint.sh"
+      - "!.env"
+      - "!README.md"
+      - "!.gitignore"
+      - "!.dockerignore"
+  push:
+    branches:
+      - "master"
+    paths:
+      - "**/*.go"
+      - "sql/*.sql"
+      - "Dockerfile"
+      - "docker-entrypoint.sh"
+      - "!.env"
+      - "!README.md"
+      - "!.gitignore"
+      - "!.dockerignore"
+  workflow_dispatch:
+
+
+env:
+  STEWAPI_SQL_DATABASE: gha
+  STEWAPI_SQL_USERNAME: admin
+  STEWAPI_SQL_PASSWORD: 123456
+  CODE: Stew
+  PACKAGE_NAME: ${{ github.event.repository.name }}
+
+
+defaults:
+  run:
+    shell: bash
+
+
+jobs:
+  test:
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ${{ env.STEWAPI_SQL_DATABASE }}
+          POSTGRES_USER: ${{ env.STEWAPI_SQL_USERNAME }}
+          POSTGRES_PASSWORD: ${{ env.STEWAPI_SQL_PASSWORD }}
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 0
+      - name: Setup Golang
+        uses: actions/setup-go@v5
+        with:
+          go-version: "^1.23.3"
+      - name: Run
+        env:
+          STEWAPI_SQL_HOST: 127.0.0.1
+        run: make
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.run_id }}
+          path: "./${{ env.CODE }}"
+          retention-days: 1
+          overwrite: true
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    if: ${{ (github.event_name == 'push' && github.ref_name == 'master') || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      
+      - name: Setup
+        id: env-setup
+        run: |
+          docker_base_image="ghcr.io/${{ github.repository_owner }}/${{ env.PACKAGE_NAME }}"
+          docker_base_image=$(echo $docker_base_image | tr '[:upper:]' '[:lower:]')
+          echo "docker_base_image=$docker_base_image" >> $GITHUB_OUTPUT
+          
+          docker_tag="nightly"
+          echo "docker_tag=$docker_tag" >> $GITHUB_OUTPUT  
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.env-setup.outputs.docker_base_image }}
+          tags: ${{ steps.env-setup.outputs.docker_tag }}
+          
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          build-args: |
+            CODE=${{ env.CODE }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  clean-image:
+    needs: build-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: NorthRealm/reusable-actions/delete-untagged-ghcr-action@main
+        with:
+          package_name: ${{ env.PACKAGE_NAME }}
+        continue-on-error: true
